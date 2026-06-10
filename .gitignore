@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment variables
+.env
+
+# Build artifacts
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+node_modules/
+.env
+dist/
+build/
+
+*.md
+*.tar.gz
+hpc_out_01.txt
+
+redmine_scraper_project/output/
+test_poller_2.py
+test_poller_3.py
+test_poller.py
+
+*.sh
+knowledge_builder/chroma_store/
+knowledge_builder/neo4j-server
+
+

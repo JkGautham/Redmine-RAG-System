@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+ollama
+chromadb
+neo4j
+sentence-transformers
+langgraph
+langchain-core
+pdfplumber
+Pillow
+pytesseract
+requests
+beautifulsoup4
+tqdm
+python-dotenv
+sse-starlette

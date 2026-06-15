@@ -49,3 +49,4 @@ knowledge_builder/chroma_store/
 knowledge_builder/neo4j-server
 
 
+rag_system/backend/.env.example

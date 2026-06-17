@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface MessageData {
   id: number;
@@ -31,27 +31,14 @@ interface ChatMessageProps {
   apiUrl: string;
 }
 
-// Highlight issue IDs like #12345 in the text
-function HighlightedText({ text }: { text: string }) {
-  const parts = text.split(/(Issue\s*#\d+|#\d+)/gi);
-  return (
-    <>
-      {parts.map((part, i) =>
-        /^(Issue\s*#\d+|#\d+)$/i.test(part) ? (
-          <span key={i} className="issue-ref">{part}</span>
-        ) : (
-          <span key={i}>{part}</span>
-        )
-      )}
-    </>
-  );
-}
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 const STAGES = [
-  { key: 'parsing',      label: 'Parse' },
-  { key: 'retrieving',   label: 'Retrieve' },
+  { key: 'parsing', label: 'Parse' },
+  { key: 'retrieving', label: 'Retrieve' },
   { key: 'synthesizing', label: 'Synthesize' },
-  { key: 'done',         label: 'Done' },
+  { key: 'done', label: 'Done' },
 ] as const;
 
 const STAGE_ORDER = ['idle', 'parsing', 'retrieving', 'compressing', 'synthesizing', 'done'];
@@ -74,6 +61,7 @@ export default function ChatMessage({
   apiUrl
 }: ChatMessageProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (isStreaming) {
@@ -81,15 +69,31 @@ export default function ChatMessage({
     }
   }, [streamingText, isStreaming]);
 
+  const handleCopy = () => {
+    navigator.clipboard.writeText(displayText || '');
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   const isUser = message.role === 'user';
-  const displayText = isStreaming && streamingText !== undefined ? streamingText : message.content;
+  let displayText = isStreaming && streamingText !== undefined ? streamingText : message.content;
+
+  if (displayText) {
+    // Strip HR lines AND the blank lines immediately around them
+    displayText = displayText.replace(/\n*[ \t]*[-*_]{3,}[ \t]*\n*/g, '\n');
+    // Collapse any remaining runs of 2+ newlines (or newlines with only spaces) to a single blank line
+    displayText = displayText.replace(/(\n[ \t]*){2,}/g, '\n').trim();
+  }
+
   const stageIdx = stage ? STAGE_ORDER.indexOf(stage) : -1;
 
   return (
     <div className={`message-row ${message.role}`} id={`message-${message.id}`}>
       {/* Avatar */}
       {!isUser && (
-        <div className="message-avatar assistant-avatar" aria-hidden="true">🤖</div>
+        <div className="message-avatar assistant-avatar" aria-hidden="true">
+          <img src="/redmin_ai_logo.png" alt="AI" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+        </div>
       )}
 
       <div className="message-bubble">
@@ -156,8 +160,10 @@ export default function ChatMessage({
 
           {/* Text content */}
           {displayText && (
-            <div className="answer-text">
-              <HighlightedText text={displayText} />
+            <div className="answer-text markdown-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {displayText}
+              </ReactMarkdown>
               {isStreaming && <span className="cursor-blink" aria-hidden="true" />}
             </div>
           )}
@@ -185,7 +191,28 @@ export default function ChatMessage({
           )}
         </div>
 
-        <div className="message-timestamp">{formatTime(message.created_at)}</div>
+        <div style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'space-between', alignItems: 'center', marginTop: '4px', padding: '0 4px' }}>
+          {!isUser && !isStreaming && displayText && (
+            <button
+              onClick={handleCopy}
+              style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '10px', padding: '0', display: 'flex', alignItems: 'center', gap: '4px', opacity: 0.7 }}
+              title="Copy to clipboard"
+            >
+              {copied ? (
+                <>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--accent-emerald)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                  <span style={{ color: 'var(--accent-emerald)' }}>Copied</span>
+                </>
+              ) : (
+                <>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  Copy
+                </>
+              )}
+            </button>
+          )}
+          <div className="message-timestamp" style={{ marginTop: 0, padding: 0 }}>{formatTime(message.created_at)}</div>
+        </div>
         <div ref={bottomRef} />
       </div>
 

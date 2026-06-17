@@ -104,7 +104,7 @@ export default function ChatSidebar({
     <aside className={`sidebar ${isOpen ? 'open' : ''}`} id="chat-sidebar">
       <div className="sidebar-header">
         <div className="sidebar-brand">
-          <div className="sidebar-brand-icon">⚡</div>
+          <img src="/redmin_ai_logo.png" alt="Logo" className="sidebar-brand-icon" style={{ background: 'none', boxShadow: 'none', padding: '2px' }} />
           <div>
             <div className="sidebar-brand-text">Redmine GraphRAG</div>
             <div className="sidebar-brand-sub">44,000 Issues</div>

@@ -334,7 +334,7 @@ export default function HomePage() {
         {/* Messages or Empty State */}
         {messages.length === 0 && !isLoading ? (
           <div className="chat-empty">
-            <div className="chat-empty-icon">⚡</div>
+            <img src="/redmin_ai_logo.png" alt="Logo" className="chat-empty-icon" style={{ background: 'none', boxShadow: 'none' }} />
             <div className="chat-empty-title">Redmine GraphRAG</div>
             <div className="chat-empty-subtitle">
               Ask anything about 44,000 Redmine issues. Root causes, blocking chains,

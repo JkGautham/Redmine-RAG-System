@@ -126,7 +126,7 @@ def _process_image_vl(path: str) -> str:
 
     # Vision-language model name fragments to detect (ordered by preference)
     vl_model_keywords = [
-        "gemma4:e4b",
+        "gemma4:e2b",
     ]
 
     try:

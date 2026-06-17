@@ -2,8 +2,9 @@ from __future__ import annotations
 """
 Stage 5: Final Synthesis
 
-Model: gemma4:e4b (thinking ON for complex/root_cause, OFF for simple)
+Model: qwen3:8b (thinking ON for complex/root_cause, OFF for simple)
 Streams tokens for responsive UI.
+Supports conversation history for contextual follow-ups.
 """
 
 import ollama
@@ -21,6 +22,9 @@ Rules:
 - For root cause questions: explain the chain of events, not just the symptom.
 - For dependency questions: trace the full blocking chain clearly.
 - For timeline questions: present events in chronological order.
+- If the user references prior conversation context, use it for continuity.
+
+{conversation_context}
 
 Question: {question}
 
@@ -29,17 +33,37 @@ Evidence:
 """
 
 
+def _format_conversation_history(history: list[dict] | None) -> str:
+    """Format prior conversation messages for the synthesis prompt."""
+    if not history:
+        return ""
+    
+    lines = ["--- Prior Conversation Context ---"]
+    for msg in history:
+        role_label = "User" if msg["role"] == "user" else "Assistant"
+        # Truncate long prior messages to save context window
+        content = msg["content"]
+        if len(content) > 500:
+            content = content[:500] + "…"
+        lines.append(f"{role_label}: {content}")
+    lines.append("--- End Prior Context ---\n")
+    return "\n".join(lines)
+
+
 def synthesize(
     question:   str,
     context:    str,
     complexity: str = "moderate",
-    intent:     str = "hybrid"
+    intent:     str = "hybrid",
+    conversation_history: list[dict] | None = None
 ) -> str:
-    """Generate final answer using gemma4:e4b with optional thinking mode."""
+    """Generate final answer using primary model with optional thinking mode."""
     use_thinking    = complexity == "complex" or intent in ("root_cause", "dependency", "hybrid")
     thinking_prefix = "/think" if use_thinking else "/no_think"
 
     from pipeline.llm_manager import chat_with_model
+    
+    conv_context = _format_conversation_history(conversation_history)
     
     # Qwen models don't need the explicit /think token
     messages = [{"role": "system", "content": "You are a senior software engineer analyzing a large codebase archive. Think step-by-step before answering."}] if use_thinking else []
@@ -48,7 +72,8 @@ def synthesize(
         "content": SYNTHESIS_PROMPT.format(
             thinking_prefix="",
             question=question,
-            context=context
+            context=context,
+            conversation_context=conv_context
         )
     })
     
@@ -80,7 +105,8 @@ def synthesize_stream(
     question:   str,
     context:    str,
     complexity: str = "moderate",
-    intent:     str = "hybrid"
+    intent:     str = "hybrid",
+    conversation_history: list[dict] | None = None
 ):
     """
     Generator version — yields token chunks for SSE streaming.
@@ -91,13 +117,16 @@ def synthesize_stream(
 
     from pipeline.llm_manager import chat_with_model
     
+    conv_context = _format_conversation_history(conversation_history)
+    
     messages = [{"role": "system", "content": "You are a senior software engineer analyzing a large codebase archive. Think step-by-step before answering."}] if use_thinking else []
     messages.append({
         "role": "user",
         "content": SYNTHESIS_PROMPT.format(
             thinking_prefix="",
             question=question,
-            context=context
+            context=context,
+            conversation_context=conv_context
         )
     })
     

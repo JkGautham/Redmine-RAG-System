@@ -1,213 +1,410 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import QueryInput from '@/components/QueryInput';
-import AnswerStream from '@/components/AnswerStream';
-import MetadataBadges from '@/components/MetadataBadges';
-import RelatedIssues from '@/components/RelatedIssues';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import ChatSidebar from '@/components/ChatSidebar';
+import ChatMessage from '@/components/ChatMessage';
+import ChatInput, { EXAMPLE_QUERIES } from '@/components/ChatInput';
+import type { ImageAttachment } from '@/components/ChatInput';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 type Stage = 'idle' | 'parsing' | 'retrieving' | 'compressing' | 'synthesizing' | 'done';
 
-interface ParsedQuery {
-  intent?: string;
-  complexity?: string;
-  needs_graph?: boolean;
-  needs_attachments?: boolean;
-  entities?: { issue_ids?: number[] };
+interface Message {
+  id: number;
+  conversation_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  ocr_text?: string | null;
+  image_filename?: string | null;
+  metadata?: any;
+  created_at: string;
 }
 
-interface FusedIssue {
-  issue_id: number;
-  subject: string;
-  status?: string;
-  tracker?: string;
-  rrf_score?: number;
+interface Conversation {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
 }
 
 export default function HomePage() {
-  const [query, setQuery]           = useState('');
-  const [answer, setAnswer]         = useState('');
-  const [parsed, setParsed]         = useState<ParsedQuery | null>(null);
-  const [fusedIssues, setFusedIssues] = useState<FusedIssue[]>([]);
-  const [fusedCount, setFusedCount] = useState(0);
-  const [elapsedMs, setElapsedMs]   = useState(0);
-  const [stage, setStage]           = useState<Stage>('idle');
-  const [isLoading, setIsLoading]   = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
+  // Conversations state
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+
+  // Streaming state
+  const [streamingText, setStreamingText] = useState('');
+  const [stage, setStage] = useState<Stage>('idle');
+  const [isLoading, setIsLoading] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
-  const [error, setError]           = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = useCallback(async () => {
-    if (!query.trim() || isLoading) return;
+  // UI state
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-    // Reset state
-    setAnswer('');
-    setParsed(null);
-    setFusedIssues([]);
-    setFusedCount(0);
-    setElapsedMs(0);
+  // ── Load conversations on mount ──
+  useEffect(() => {
+    fetchConversations();
+  }, []);
+
+  const fetchConversations = async () => {
+    try {
+      const resp = await fetch(`${API_URL}/conversations`);
+      if (resp.ok) {
+        const data = await resp.json();
+        setConversations(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch conversations:', err);
+    }
+  };
+
+  const fetchMessages = async (convId: string) => {
+    try {
+      const resp = await fetch(`${API_URL}/conversations/${convId}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        setMessages(data.messages || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch messages:', err);
+    }
+  };
+
+  // ── Select conversation ──
+  const selectConversation = useCallback(async (convId: string) => {
+    setActiveConvId(convId);
+    setSidebarOpen(false);
+    await fetchMessages(convId);
+    setStreamingText('');
+    setStage('idle');
+    setError(null);
+  }, []);
+
+  // ── Create new conversation ──
+  const createNewChat = useCallback(async () => {
+    try {
+      const resp = await fetch(`${API_URL}/conversations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'New Chat' }),
+      });
+      if (resp.ok) {
+        const conv = await resp.json();
+        setConversations(prev => [conv, ...prev]);
+        setActiveConvId(conv.id);
+        setMessages([]);
+        setStreamingText('');
+        setStage('idle');
+        setError(null);
+        setSidebarOpen(false);
+      }
+    } catch (err) {
+      console.error('Failed to create conversation:', err);
+    }
+  }, []);
+
+  // ── Delete conversation ──
+  const deleteConversation = useCallback(async (convId: string) => {
+    try {
+      await fetch(`${API_URL}/conversations/${convId}`, { method: 'DELETE' });
+      setConversations(prev => prev.filter(c => c.id !== convId));
+      if (activeConvId === convId) {
+        setActiveConvId(null);
+        setMessages([]);
+      }
+    } catch (err) {
+      console.error('Failed to delete conversation:', err);
+    }
+  }, [activeConvId]);
+
+  // ── Scroll to bottom ──
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, streamingText, scrollToBottom]);
+
+  // ── Send message ──
+  const handleSend = useCallback(async (text: string, images: ImageAttachment[]) => {
+    if (isLoading) return;
+
+    let convId = activeConvId;
+
+    // Auto-create conversation if none selected
+    if (!convId) {
+      try {
+        const resp = await fetch(`${API_URL}/conversations`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: 'New Chat' }),
+        });
+        if (resp.ok) {
+          const conv = await resp.json();
+          convId = conv.id;
+          setConversations(prev => [conv, ...prev]);
+          setActiveConvId(convId);
+        }
+      } catch (err) {
+        setError('Failed to create conversation');
+        return;
+      }
+    }
+
+    if (!convId) return;
+
+    // Collect OCR text from images
+    const ocrTexts = images
+      .filter(img => img.ocrText)
+      .map(img => img.ocrText!);
+    const combinedOcrText = ocrTexts.length > 0 ? ocrTexts.join('\n\n---\n\n') : undefined;
+
+    // Optimistically add user message to UI
+    const userMsg: Message = {
+      id: Date.now(),
+      conversation_id: convId,
+      role: 'user',
+      content: text,
+      ocr_text: combinedOcrText || null,
+      image_filename: images.length > 0 ? images[0].file.name : null,
+      created_at: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, userMsg]);
+
+    // Reset streaming state
+    setStreamingText('');
     setError(null);
     setIsLoading(true);
-    setIsStreaming(false);
     setIsThinking(false);
     setStage('parsing');
 
-    const t0 = Date.now();
-
     try {
-      // Use SSE streaming endpoint
-      const url = `${API_URL}/ask/stream?query=${encodeURIComponent(query)}`;
-      const evtSource = new EventSource(url);
-
-      evtSource.addEventListener('parsed', e => {
-        try {
-          const data = JSON.parse(e.data);
-          setParsed(data);
-          setStage('retrieving');
-        } catch {}
+      // Use the chat-aware streaming endpoint
+      const resp = await fetch(`${API_URL}/ask/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: text,
+          conversation_id: convId,
+          ocr_text: combinedOcrText || null,
+        }),
       });
 
-      evtSource.addEventListener('retrieved', e => {
-        try {
-          const data = JSON.parse(e.data);
-          setFusedCount(data.fused_count || 0);
-          setStage('synthesizing');
-          setIsStreaming(true);
-          setIsThinking(true);
-        } catch {}
-        setStage('synthesizing');
-      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-      evtSource.addEventListener('context_ready', () => {
-        setStage('synthesizing');
-        setIsStreaming(true);
-      });
+      const reader = resp.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullAnswer = '';
+      let currentEvent = '';
 
-      evtSource.addEventListener('token', e => {
-        setIsThinking(false);
-        setAnswer(prev => prev + e.data);
-      });
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-      evtSource.addEventListener('done', () => {
-        evtSource.close();
-        setStage('done');
-        setIsStreaming(false);
-        setIsLoading(false);
-        setElapsedMs(Date.now() - t0);
-      });
+          buffer += decoder.decode(value, { stream: true });
+          
+          // SSE format: "event: xxx\ndata: yyy\n\n"
+          // Process complete SSE blocks (separated by double newlines)
+          const blocks = buffer.split('\n\n');
+          buffer = blocks.pop() || ''; // Keep incomplete block in buffer
 
-      evtSource.onerror = async () => {
-        evtSource.close();
-        // Fallback to non-streaming POST /ask
-        try {
-          setStage('synthesizing');
-          const resp = await fetch(`${API_URL}/ask`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query }),
-          });
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          const data = await resp.json();
-          setAnswer(data.answer || '');
-          setParsed(data.parsed || null);
-          setFusedCount(data.fused_count || 0);
-          setElapsedMs(data.elapsed_ms || (Date.now() - t0));
-          if (data.error) setError(data.error);
-        } catch (err: any) {
-          setError(err.message || 'Request failed');
-        } finally {
-          setStage('done');
-          setIsStreaming(false);
-          setIsLoading(false);
+          for (const block of blocks) {
+            if (!block.trim()) continue;
+            
+            const lines = block.split('\n');
+            let eventType = '';
+            let dataStr = '';
+
+            for (const line of lines) {
+              if (line.startsWith('event:')) {
+                eventType = line.slice(6).trim();
+              } else if (line.startsWith('data:')) {
+                dataStr = line.slice(5).trim();
+              }
+            }
+
+            switch (eventType) {
+              case 'parsed':
+                setStage('retrieving');
+                break;
+              case 'retrieved':
+                setStage('synthesizing');
+                setIsThinking(true);
+                break;
+              case 'context_ready':
+                setStage('synthesizing');
+                break;
+              case 'token':
+                setIsThinking(false);
+                fullAnswer += dataStr;
+                setStreamingText(fullAnswer);
+                break;
+              case 'done':
+                setStage('done');
+                setIsLoading(false);
+                break;
+            }
+          }
         }
-      };
+      }
+
+      // Refresh messages from server to get proper IDs and metadata
+      await fetchMessages(convId);
+      setStreamingText('');
+      setStage('idle');
 
     } catch (err: any) {
-      setError(err.message || 'Request failed');
-      setStage('idle');
+      // Fallback to non-streaming POST /ask
+      try {
+        const resp = await fetch(`${API_URL}/ask`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: text }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          // Refresh messages
+          await fetchMessages(convId!);
+          setStreamingText('');
+        } else {
+          setError(`Request failed: HTTP ${resp.status}`);
+        }
+      } catch (fallbackErr: any) {
+        setError(fallbackErr.message || 'Request failed');
+      }
+    } finally {
       setIsLoading(false);
+      setStage('idle');
+      setIsThinking(false);
+      // Refresh conversation list to update titles
+      fetchConversations();
     }
-  }, [query, isLoading]);
+  }, [activeConvId, isLoading]);
 
-  const hasResult = stage !== 'idle' || answer || error;
+  // Handle example query click
+  const handleExampleClick = useCallback((query: string) => {
+    handleSend(query, []);
+  }, [handleSend]);
+
+  // Get active conversation title
+  const activeConv = conversations.find(c => c.id === activeConvId);
 
   return (
-    <main className="main-container" id="main-content">
-      {/* Header */}
-      <header className="header">
-        <div className="header-badge" id="header-badge">
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
-            <circle cx="5" cy="5" r="4" opacity="0.8"/>
-          </svg>
-          GraphRAG · 44,000 Issues
-        </div>
-        <h1 className="header-title">Redmine<br />Search</h1>
-      </header>
-
-      {/* Query Input */}
-      <QueryInput
-        value={query}
-        onChange={setQuery}
-        onSubmit={handleSubmit}
-        isLoading={isLoading}
+    <>
+      {/* Sidebar */}
+      <ChatSidebar
+        conversations={conversations}
+        activeId={activeConvId}
+        onSelect={selectConversation}
+        onNewChat={createNewChat}
+        onDelete={deleteConversation}
+        isOpen={sidebarOpen}
       />
 
-      {/* Results area */}
-      {hasResult && (
-        <div className="answer-container">
-          {/* Metadata strip */}
-          <MetadataBadges
-            parsed={parsed}
-            fusedCount={fusedCount}
-            elapsedMs={elapsedMs}
-            isVisible={!!parsed || stage !== 'idle'}
-          />
+      {/* Main chat area */}
+      <main className="chat-main" id="main-content">
+        {/* Chat Header */}
+        <div className="chat-header">
+          <button
+            className="mobile-sidebar-toggle"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            aria-label="Toggle sidebar"
+          >
+            ☰
+          </button>
+          <span className="chat-header-title">
+            {activeConv ? activeConv.title : 'Redmine GraphRAG'}
+          </span>
+          <span className="chat-header-badge">
+            <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor">
+              <circle cx="5" cy="5" r="4"/>
+            </svg>
+            AI-Powered
+          </span>
+        </div>
 
-          {/* Error */}
-          {error && (
-            <div className="error-card" id="error-card" role="alert">
-              <span className="error-icon">⚠️</span>
-              <div>
-                <div className="error-title">Pipeline Error</div>
-                <div className="error-message">{error}</div>
-              </div>
+        {/* Messages or Empty State */}
+        {messages.length === 0 && !isLoading ? (
+          <div className="chat-empty">
+            <div className="chat-empty-icon">⚡</div>
+            <div className="chat-empty-title">Redmine GraphRAG</div>
+            <div className="chat-empty-subtitle">
+              Ask anything about 44,000 Redmine issues. Root causes, blocking chains,
+              duplicate bugs, timeline analysis — powered by vector + graph fusion.
             </div>
-          )}
-
-          {/* Streaming answer */}
-          <AnswerStream
-            text={answer}
-            isStreaming={isStreaming}
-            isThinking={isThinking}
-            stage={stage}
-          />
-
-          {/* Related issues */}
-          <RelatedIssues
-            issues={fusedIssues}
-            isVisible={stage === 'done' && fusedIssues.length > 0}
-          />
-        </div>
-      )}
-
-      {/* Empty state */}
-      {!hasResult && (
-        <div className="empty-state" id="empty-state">
-          <div className="empty-icon">🔍</div>
-          <div className="empty-title">Ask anything about Redmine</div>
-          <div className="empty-subtitle">
-            Root causes, blocking chains, duplicate bugs, timeline analysis,
-            attachment contents — all answered using 20 years of archived data.
+            <div className="chat-empty-chips">
+              {EXAMPLE_QUERIES.map((q, i) => (
+                <button
+                  key={i}
+                  className="empty-chip"
+                  onClick={() => handleExampleClick(q)}
+                  id={`example-query-${i}`}
+                >
+                  {q.length > 55 ? q.slice(0, 55) + '…' : q}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="chat-messages" id="chat-messages">
+            <div className="chat-messages-inner">
+              {messages.map((msg) => (
+                <ChatMessage
+                  key={msg.id}
+                  message={msg}
+                  apiUrl={API_URL}
+                />
+              ))}
 
-      {/* Footer */}
-      <footer className="footer" id="page-footer">
-        Redmine GraphRAG · gemma4:e4b + qwen2.5-coder:7b · ChromaDB + Neo4j · Local AI
-      </footer>
-    </main>
+              {/* Streaming message (in progress) */}
+              {isLoading && (
+                <ChatMessage
+                  message={{
+                    id: -1,
+                    conversation_id: activeConvId || '',
+                    role: 'assistant',
+                    content: '',
+                    created_at: new Date().toISOString(),
+                  }}
+                  isStreaming={true}
+                  isThinking={isThinking}
+                  streamingText={streamingText}
+                  stage={stage}
+                  apiUrl={API_URL}
+                />
+              )}
+
+              {/* Error */}
+              {error && (
+                <div className="error-card" role="alert">
+                  <span className="error-icon">⚠️</span>
+                  <div>
+                    <div className="error-title">Pipeline Error</div>
+                    <div className="error-message">{error}</div>
+                  </div>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
+            </div>
+          </div>
+        )}
+
+        {/* Chat Input */}
+        <ChatInput
+          onSend={handleSend}
+          isLoading={isLoading}
+          apiUrl={API_URL}
+        />
+      </main>
+    </>
   );
 }

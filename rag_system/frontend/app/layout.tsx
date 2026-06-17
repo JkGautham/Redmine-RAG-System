@@ -2,11 +2,12 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Redmine GraphRAG — Intelligent Issue Search',
+  title: 'Redmine GraphRAG — AI-Powered Issue Intelligence',
   description:
-    'AI-powered question answering over 44,000 Redmine issues, 41,427 journal discussions, ' +
-    'and 10,253 attachments spanning 20 years of Redmine development history.',
-  keywords: ['Redmine', 'RAG', 'GraphRAG', 'issue tracker', 'AI', 'search'],
+    'Chat-based AI question answering over 44,000 Redmine issues, 41,427 journal discussions, ' +
+    'and 10,253 attachments spanning 20 years of Redmine development history. ' +
+    'Upload images for OCR analysis. Powered by vector + graph fusion.',
+  keywords: ['Redmine', 'RAG', 'GraphRAG', 'issue tracker', 'AI', 'search', 'chat', 'OCR'],
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -19,6 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <div className="bg-animated" aria-hidden="true" />
+        <div className="bg-animated-extra" aria-hidden="true" />
         <div className="app-layout">
           {children}
         </div>

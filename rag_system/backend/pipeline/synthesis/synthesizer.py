@@ -19,6 +19,7 @@ Rules:
 - Answer using ONLY the evidence provided below.
 - Always cite issue IDs (e.g. "Issue #44132") when referencing specific items.
 - If the evidence is insufficient, say so — do not guess or hallucinate.
+- If you see a "Graph Query Results (DIRECT ANSWER)" section, prioritize it heavily. It contains precise, factual records retrieved directly from the knowledge graph.
 - For root cause questions: explain the chain of events, not just the symptom.
 - For dependency questions: trace the full blocking chain clearly.
 - For timeline questions: present events in chronological order.
@@ -83,7 +84,7 @@ def synthesize(
         options={
             "temperature": 0.2,
             "num_predict": 4096,
-            "num_ctx":     24000
+            "num_ctx":     30000
         },
         stream=True
     )
@@ -136,7 +137,7 @@ def synthesize_stream(
         options={
             "temperature": 0.2,
             "num_predict": 4096,
-            "num_ctx":     24000
+            "num_ctx":     30000
         },
         stream=True
     )

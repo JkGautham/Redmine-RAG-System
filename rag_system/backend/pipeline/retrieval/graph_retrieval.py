@@ -251,6 +251,7 @@ def graph_common_ancestors(id1: int, id2: int) -> dict:
 
 CYPHER_GEN_PROMPT = """You are a Neo4j Cypher expert for a Redmine issue tracker graph.
 
+=== SCHEMA ===
 Node labels and properties:
   Issue        {id: int, subject: str, status: str, tracker: str,
                 priority: str, created_on: str, updated_on: str, summary: str}
@@ -263,12 +264,18 @@ Node labels and properties:
   Project      {name: str}
   Entity       {canonical_name: str, entity_type: str, display_name: str}
 
-Relationship types:
+Relationship types (ALL directed):
   (Issue)-[:BLOCKS]->(Issue)
   (Issue)-[:BLOCKED_BY]->(Issue)
   (Issue)-[:DUPLICATES]->(Issue)
   (Issue)-[:DUPLICATED_BY]->(Issue)
   (Issue)-[:RELATED_TO]->(Issue)
+  (Issue)-[:PRECEDES]->(Issue)
+  (Issue)-[:FOLLOWS]->(Issue)
+  (Issue)-[:PARENT_OF]->(Issue)
+  (Issue)-[:CHILD_OF]->(Issue)
+  (Issue)-[:COPIED_TO]->(Issue)
+  (Issue)-[:COPIED_FROM]->(Issue)
   (Issue)-[:HAS_JOURNAL]->(JournalEntry)
   (Issue)-[:HAS_ATTACHMENT]->(Attachment)
   (Issue)-[:HAS_STATUS]->(Status)
@@ -279,34 +286,180 @@ Relationship types:
   (Issue)-[:BELONGS_TO]->(Project)
   (Issue)-[:MENTIONS]->(Entity)
 
-IMPORTANT RULES:
-- Variable-length path depths MUST be hardcoded integers, NOT parameters.
-  e.g. -[:BLOCKS*1..3]-> NOT -[:BLOCKS*1..$depth]->
-- Always include LIMIT clause (max 50).
-- Return ONLY the Cypher query. No explanation. No markdown fences. No comments.
+=== STRICT RULES ===
+1. Path depths MUST be hardcoded integers: -[:BLOCKS*1..3]->  NOT -[:BLOCKS*1..$depth]->
+2. Always include a LIMIT clause (max 50).
+3. Return ONLY the Cypher query — no explanation, no markdown fences (```), no comments.
+4. Never use PRECEDES|FOLLOWS|PARENT_OF|CHILD_OF|COPIED_TO|COPIED_FROM with undirected (-) patterns;
+   always use directed (-> or <-) arrows.
 
-Task: {task}
+=== BANNED SYNTAX (will cause runtime errors) ===
+- `variable := expression`  -- Cypher has no assignment operator. Use aliases: RETURN x AS y
+- `CALL { ... }` without `WITH` to pass outer variables in: variables from outside a subquery
+  are NOT visible inside unless explicitly imported with WITH.
+- `WITH x, y CALL { MATCH ... }` -- you MUST write: `WITH x, y CALL { WITH x, y MATCH ... }`
+- Returning a variable defined only inside a CALL{} subquery in the outer RETURN -- subquery
+  variables do NOT leak out. Collect them inside the subquery and RETURN them.
+- Using $parameters for path depths like *1..$depth.
+
+=== CALL SUBQUERY SCOPING RULES ===
+Variables defined outside CALL { } are NOT automatically available inside.
+You must import them explicitly:
+
+  -- WRONG:
+  MATCH (u:User {name: $name})
+  CALL {
+    MATCH (u)<-[:REPORTED_BY]-(i:Issue)   -- ERROR: u is not in scope
+    RETURN i
+  }
+
+  -- CORRECT:
+  MATCH (u:User {name: $name})
+  CALL {
+    WITH u                                -- import u first
+    MATCH (u)<-[:REPORTED_BY]-(i:Issue)
+    RETURN i
+  }
+  RETURN i
+
+=== RELATIONSHIP DIRECTION RULES ===
+The schema defines (Issue)-[:REPORTED_BY]->(User).
+So to find the reporter of an issue:
+  MATCH (i:Issue {id: $issueId})-[:REPORTED_BY]->(u:User)
+
+To find all issues reported by a user:
+  MATCH (i:Issue)-[:REPORTED_BY]->(u:User {name: $name})
+
+NOT:  MATCH (r:User)<-[:REPORTED_BY]-(j:Issue)  -- this direction is also valid for the
+      REPORTED_BY edge above, but be consistent and prefer the outgoing form.
+
+=== GOLDEN EXAMPLES ===
+
+Example 1 — get an issue with its reporter and assignee:
+  MATCH (i:Issue {id: $issueId})
+  OPTIONAL MATCH (i)-[:REPORTED_BY]->(reporter:User)
+  OPTIONAL MATCH (i)-[:ASSIGNED_TO]->(assignee:User)
+  RETURN i.id AS id, i.subject AS subject, reporter.name AS reporter, assignee.name AS assignee
+  LIMIT 1
+
+Example 2 — latest issue by the same reporter (NO CALL subquery needed):
+  MATCH (i:Issue {id: $issueId})-[:REPORTED_BY]->(u:User)
+  MATCH (other:Issue)-[:REPORTED_BY]->(u)
+  WHERE other.id <> i.id
+  RETURN other.id AS otherId, other.subject AS subject, other.created_on AS created_on
+  ORDER BY other.created_on DESC
+  LIMIT 5
+
+Example 3 — issues related via multi-hop BLOCKS, same reporter:
+  MATCH (i:Issue {id: $issueId})-[:REPORTED_BY]->(u:User)
+  MATCH (i)-[:BLOCKS*1..3]->(related:Issue)-[:REPORTED_BY]->(u)
+  RETURN related.id AS relatedId, related.subject AS subject, related.updated_on AS updated_on
+  ORDER BY related.updated_on DESC
+  LIMIT 20
+
+Example 4 — CALL subquery correctly importing outer variable:
+  MATCH (i:Issue {id: $issueId})-[:REPORTED_BY]->(u:User)
+  CALL {
+    WITH u
+    MATCH (other:Issue)-[:REPORTED_BY]->(u)
+    RETURN other ORDER BY other.created_on DESC LIMIT 1
+  }
+  RETURN i.id AS issueId, other.id AS latestIssueId, other.subject AS latestSubject
+
+Example 5 — blocking chain:
+  MATCH path = (blocker:Issue)-[:BLOCKS*1..5]->(i:Issue {id: $issueId})
+  RETURN blocker.id AS blockerId, blocker.subject AS subject, blocker.status AS status,
+         [n IN nodes(path) | n.id] AS nodePath,
+         [r IN relationships(path) | type(r)] AS edgePath
+  ORDER BY length(path)
+  LIMIT 30
+
+=== TASK ===
+{task}
 """
 
 
+# ── Static anti-pattern rules for local pre-validation ──────────────────────
+
+_BANNED_PATTERNS = [
+    # Invalid Cypher assignment operator
+    (r":=", "`variable := expr` is not valid Cypher. Use `RETURN expr AS alias` instead."),
+    # CALL {} without importing outer variables via WITH inside
+    (
+        r"CALL\s*\{(?:[^}](?!WITH))*MATCH",
+        "CALL { } subquery uses outer variables without importing them. "
+        "Add `WITH <var>` as the first line inside CALL { }.",
+    ),
+    # Parameterised path depth
+    (r"\*\d+\.\.\s*\$\w+", "Path depth must be a hardcoded integer, not a parameter (e.g. *1..5 not *1..$n)."),
+]
+
+
+def _validate_cypher(cypher: str) -> list[str]:
+    """Return a list of human-readable violation messages, empty if query looks OK."""
+    import re
+    violations: list[str] = []
+    for pattern, message in _BANNED_PATTERNS:
+        if re.search(pattern, cypher, re.IGNORECASE | re.DOTALL):
+            violations.append(message)
+    return violations
+
+
+def _strip_fences(text: str) -> str:
+    for fence in ["```cypher", "```sql", "```", "CYPHER"]:
+        text = text.replace(fence, "")
+    return text.strip()
+
+
 def generate_cypher(task: str) -> str:
+    """Generate a Neo4j Cypher query from a natural language task description.
+
+    Includes a pre-execution validation pass that feeds specific violation
+    messages back to the model for a targeted correction attempt before the
+    query ever touches Neo4j.
+    """
     from pipeline.llm_manager import chat_with_model
-    # qwen3:8b handles Cypher well enough; only switch to coder model if configured differently
     model = CYPHER_MODEL if CYPHER_MODEL != PRIMARY_MODEL else PRIMARY_MODEL
+
     response = chat_with_model(
         model=model,
         messages=[{"role": "user", "content": CYPHER_GEN_PROMPT.replace("{task}", task)}],
-        options={"temperature": 0.0, "num_predict": 600, "num_ctx": 4096}
+        options={"temperature": 0.0, "num_predict": 800, "num_ctx": 10240},
     )
-    cypher = response["message"]["content"].strip()
-    for fence in ["```cypher", "```sql", "```", "CYPHER"]:
-        cypher = cypher.replace(fence, "")
-    return cypher.strip()
+    cypher = _strip_fences(response["message"]["content"].strip())
+
+    # Pre-validation: catch common structural errors before hitting Neo4j
+    violations = _validate_cypher(cypher)
+    if violations:
+        violation_list = "\n".join(f"  - {v}" for v in violations)
+        correction_prompt = (
+            f"The following Cypher query has syntax/structural errors:\n\n"
+            f"Query:\n{cypher}\n\n"
+            f"Violations found:\n{violation_list}\n\n"
+            "Rules to remember:\n"
+            "  1. Use `RETURN expr AS alias`, never `variable := expr`.\n"
+            "  2. Inside CALL { }, always start with `WITH <outer_var>` for every outer variable you use.\n"
+            "  3. Path depths must be literals: *1..5 not *1..$n.\n\n"
+            "Return ONLY the corrected Cypher query. No explanation. No markdown fences."
+        )
+        fixed_resp = chat_with_model(
+            model=model,
+            messages=[{"role": "user", "content": correction_prompt}],
+            options={"temperature": 0.0, "num_predict": 800, "num_ctx": 10240},
+        )
+        cypher = _strip_fences(fixed_resp["message"]["content"].strip())
+        print(
+            f"=== [Graph] Cypher pre-validation fixed violations:\n"
+            + violation_list
+            + f"\nCorrected query:\n{cypher}\n==="
+        )
+
+    return cypher
 
 
 def graph_query_dynamic(task_description: str) -> dict:
     """
-    Natural language → Cypher → Neo4j.
+    Natural language → Cypher (with pre-validation) → Neo4j.
     Returns dict compatible with graph_expand() return format.
     """
     cypher = generate_cypher(task_description)
@@ -318,24 +471,21 @@ def graph_query_dynamic(task_description: str) -> dict:
             rows = [dict(r) for r in result]
             return {"dynamic_query": rows, "outgoing": [], "incoming": [], "journals": [], "entities": []}
     except Exception as e:
-        correction_prompt = f"""The following Cypher query produced an error.
-
-Query:
-{cypher}
-
-Error:
-{str(e)}
-
-Fix the query and return ONLY the corrected Cypher. No explanation.
-"""
+        # Neo4j returned an error — feed it back for a final correction attempt
+        correction_prompt = (
+            f"The following Cypher query produced a Neo4j error.\n\n"
+            f"Query:\n{cypher}\n\n"
+            f"Error:\n{str(e)}\n\n"
+            "Fix the query and return ONLY the corrected Cypher. No explanation. No markdown fences."
+        )
         from pipeline.llm_manager import chat_with_model
         fixed = chat_with_model(
             model=CYPHER_MODEL if CYPHER_MODEL != PRIMARY_MODEL else PRIMARY_MODEL,
             messages=[{"role": "user", "content": correction_prompt}],
-            options={"temperature": 0.0, "num_predict": 600}
+            options={"temperature": 0.0, "num_predict": 800},
         )
-        fixed_cypher = (fixed["message"]["content"].strip()
-                        .replace("```cypher", "").replace("```", "").strip())
+        fixed_cypher = _strip_fences(fixed["message"]["content"].strip())
+        print(f"=== [Graph] Cypher corrected after Neo4j error ===\n{fixed_cypher}\n===")
         try:
             with driver.session() as session:
                 result = session.run(fixed_cypher)
@@ -343,6 +493,123 @@ Fix the query and return ONLY the corrected Cypher. No explanation.
                 return {"dynamic_query": rows, "outgoing": [], "incoming": [], "journals": [], "entities": []}
         except Exception as e2:
             return {"dynamic_query": [{"error": str(e2)}], "outgoing": [], "incoming": [], "journals": [], "entities": []}
+
+
+def graph_get_attachments(issue_id: int) -> list[dict]:
+    """
+    Query Neo4j for all attachments linked to an issue.
+    
+    First tries direct HAS_ATTACHMENT relationships.
+    If none found, falls back to finding attachments through journal entries
+    (which mention file uploads in their changes).
+    
+    Returns: [{"filename": str, "url": str, "attachment_id": str, "size": str}, ...]
+    """
+    driver = _get_driver()
+    
+    def _parse_size(size_str):
+        """Parse size like '11.4 KB' to bytes (best effort)."""
+        if not size_str:
+            return 0
+        try:
+            # Handle both int and string sizes
+            if isinstance(size_str, int):
+                return size_str
+            size_str = str(size_str).strip()
+            if size_str.isdigit():
+                return int(size_str)
+            # Parse "11.4 KB", "1.5 MB" etc
+            parts = size_str.split()
+            if len(parts) >= 1:
+                val = float(parts[0])
+                unit = parts[1].upper() if len(parts) > 1 else "B"
+                multipliers = {"B": 1, "KB": 1024, "MB": 1024*1024, "GB": 1024*1024*1024}
+                return int(val * multipliers.get(unit, 1))
+        except (ValueError, AttributeError):
+            pass
+        return 0
+    
+    try:
+        with driver.session() as session:
+            # Method 1: Direct HAS_ATTACHMENT relationship
+            result = session.run("""
+                MATCH (i:Issue {id: $id})-[:HAS_ATTACHMENT]->(a:Attachment)
+                RETURN
+                    a.attachment_id AS attachment_id,
+                    a.filename      AS filename,
+                    a.url           AS url,
+                    a.size          AS size
+                ORDER BY a.filename ASC
+            """, id=issue_id)
+            
+            attachments = []
+            for record in result:
+                att = dict(record)
+                if att.get("attachment_id") and att.get("filename") and att.get("url"):
+                    attachments.append({
+                        "filename":      att["filename"],
+                        "url":           att["url"],
+                        "attachment_id": str(att["attachment_id"]),
+                        "file_size":     _parse_size(att.get("size", 0))
+                    })
+            
+            if attachments:
+                return attachments
+            
+            # Method 2: Fallback - extract from journal entries
+            # Journals record file uploads in their changes field (e.g. "File foo.png foo.png added")
+            print(f"=== [Graph] No direct HAS_ATTACHMENT edges found, using journal fallback ===")
+            result = session.run("""
+                MATCH (i:Issue {id: $id})-[:HAS_JOURNAL]->(j:JournalEntry)
+                WHERE j.changes IS NOT NULL
+                RETURN j.changes as changes
+            """, id=issue_id)
+            
+            # Parse changes to find file mentions
+            filenames_mentioned = set()
+            for record in result:
+                changes = record.get("changes", [])
+                if isinstance(changes, list):
+                    for change in changes:
+                        if isinstance(change, str) and "File" in change and "added" in change:
+                            # Parse "File foo.png foo.png added" format
+                            parts = change.split()
+                            if len(parts) >= 3 and parts[0] == "File":
+                                filename = parts[1]
+                                filenames_mentioned.add(filename)
+            
+            # Query for attachments with these filenames
+            if filenames_mentioned:
+                result = session.run("""
+                    MATCH (a:Attachment)
+                    WHERE a.filename IN $filenames
+                    RETURN
+                        a.attachment_id AS attachment_id,
+                        a.filename      AS filename,
+                        a.url           AS url,
+                        a.size          AS size
+                    ORDER BY a.filename ASC
+                """, filenames=list(filenames_mentioned))
+                
+                attachments = []
+                for record in result:
+                    att = dict(record)
+                    if att.get("attachment_id") and att.get("filename") and att.get("url"):
+                        attachments.append({
+                            "filename":      att["filename"],
+                            "url":           att["url"],
+                            "attachment_id": str(att["attachment_id"]),
+                            "file_size":     _parse_size(att.get("size", 0))
+                        })
+                
+                if attachments:
+                    print(f"=== [Graph] Found {len(attachments)} attachments via journal fallback ===")
+                    return attachments
+            
+            return []
+    except Exception as e:
+        print(f"=== [Graph] Failed to retrieve attachments from Neo4j: {e} ===")
+        return []
 
 
 def close():

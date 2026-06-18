@@ -53,3 +53,6 @@ rag_system/backend/.env.example
 rag_system/backend/uploads/
 rag_system/backend/attachments_cache/
 rag_system/backend/chat_history.db
+test_attachment_fix.py
+test_qa.py
+rag_system/backend/tests/test_preprocessor.py

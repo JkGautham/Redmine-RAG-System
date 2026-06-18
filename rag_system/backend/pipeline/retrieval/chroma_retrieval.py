@@ -173,6 +173,24 @@ def get_journals_for_issue(issue_id: int) -> list[dict]:
 
 # ─── Attachment index ────────────────────────────────────────────────────────
 
+def _parse_size(size_val) -> int:
+    if not size_val:
+        return 0
+    s = str(size_val).lower().strip()
+    try:
+        if s.endswith("kb"):
+            return int(float(s.replace("kb", "").strip()) * 1024)
+        elif s.endswith("mb"):
+            return int(float(s.replace("mb", "").strip()) * 1024 * 1024)
+        elif s.endswith("bytes"):
+            return int(s.replace("bytes", "").strip())
+        elif s.endswith("b"):
+            return int(s.replace("b", "").strip())
+        else:
+            return int(float(s))
+    except ValueError:
+        return 0
+
 def get_attachment_index(issue_id: int) -> list[dict]:
     col = _get_collection()
     results = col.get(
@@ -180,17 +198,36 @@ def get_attachment_index(issue_id: int) -> list[dict]:
         include=["metadatas"]
     )
     attachments = []
-    for meta in results["metadatas"]:
+    seen_urls = set()
+
+    for meta in results.get("metadatas", []):
+        # 1. Handle attachments stored as distinct chunks
+        if meta.get("chunk_type") == "attachment_metadata":
+            url = meta.get("url", "").strip()
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                attachments.append({
+                    "filename":      meta.get("filename", "").strip(),
+                    "content_type":  meta.get("mime_type", _guess_content_type(meta.get("filename", ""))),
+                    "url":           url,
+                    "file_size":     _parse_size(meta.get("size")),
+                    "attachment_id": str(meta.get("attachment_id", ""))
+                })
+                
+        # 2. Handle legacy comma-separated lists on main issue chunks
         att_urls  = meta.get("attachment_urls", "")
         att_files = meta.get("attachment_filenames", "")
         if att_urls and att_files:
             for url, fname in zip(att_urls.split(","), att_files.split(",")):
-                attachments.append({
-                    "filename":     fname.strip(),
-                    "content_type": _guess_content_type(fname.strip()),
-                    "url":          url.strip(),
-                    "file_size":    0
-                })
+                url = url.strip()
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    attachments.append({
+                        "filename":     fname.strip(),
+                        "content_type": _guess_content_type(fname.strip()),
+                        "url":          url,
+                        "file_size":    0
+                    })
     return attachments
 
 

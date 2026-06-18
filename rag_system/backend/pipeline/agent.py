@@ -91,45 +91,59 @@ def node_retrieve(state: AgentState) -> AgentState:
 
     def run_graph():
         op = parsed.get("graph_operation", "none")
-        if "graph_operation" in plan or op != "none":
-            from pipeline.retrieval.graph_retrieval import (
-                graph_expand, graph_shortest_path, graph_bidirectional_search,
-                graph_common_ancestors, graph_query_dynamic
-            )
-            if op in ("shortest_path", "dependency_chain") and len(ids) >= 2:
-                print(f"=== [Pipeline] Accessing Neo4j Graph (Shortest Path) for IDs: {ids[0]} to {ids[1]} ===")
-                return graph_shortest_path(ids[0], ids[1])
-            elif op == "bidirectional_search" and len(ids) >= 2:
-                print(f"=== [Pipeline] Accessing Neo4j Graph (Bidirectional) for IDs: {ids[0]} to {ids[1]} ===")
-                return graph_bidirectional_search(ids[0], ids[1])
-            elif op == "common_ancestors" and len(ids) >= 2:
-                print(f"=== [Pipeline] Accessing Neo4j Graph (Common Ancestors) for IDs: {ids[0]} and {ids[1]} ===")
-                return graph_common_ancestors(ids[0], ids[1])
-            elif op in ("ego_network", "find_blockers", "find_blocked", "find_related", "find_duplicates") and ids:
-                print(f"=== [Pipeline] Accessing Neo4j Graph (Ego/Expand) for ID: {ids[0]} ===")
-                # Expand ALL IDs and merge results for multi-hop
-                merged = graph_expand(ids[0], depth=5)
-                for extra_id in ids[1:]:
-                    extra = graph_expand(extra_id, depth=5)
-                    merged["outgoing"].extend(extra.get("outgoing", []))
-                    merged["incoming"].extend(extra.get("incoming", []))
-                    merged["journals"].extend(extra.get("journals", []))
-                    merged["entities"].extend(extra.get("entities", []))
-                return merged
-            elif op == "dynamic" or (not ids and op != "none"):
-                print(f"=== [Pipeline] Accessing Neo4j Graph (Dynamic Query) for: '{query}' ===")
-                return graph_query_dynamic(query)
-            elif ids:
-                print(f"=== [Pipeline] Accessing Neo4j Graph (Fallback Expand) for ID: {ids[0]} ===")
-                merged = graph_expand(ids[0], depth=5)
-                for extra_id in ids[1:]:
-                    extra = graph_expand(extra_id, depth=5)
-                    merged["outgoing"].extend(extra.get("outgoing", []))
-                    merged["incoming"].extend(extra.get("incoming", []))
-                    merged["journals"].extend(extra.get("journals", []))
-                    merged["entities"].extend(extra.get("entities", []))
-                return merged
-        return {}
+        # Only fire graph retrieval when explicitly requested
+        needs_graph = ("graph_operation" in plan) or (op != "none")
+        if not needs_graph:
+            return {}
+
+        from pipeline.retrieval.graph_retrieval import (
+            graph_expand, graph_shortest_path, graph_bidirectional_search,
+            graph_common_ancestors, graph_query_dynamic
+        )
+
+        if op in ("shortest_path", "dependency_chain") and len(ids) >= 2:
+            print(f"=== [Pipeline] Accessing Neo4j Graph (Shortest Path) for IDs: {ids[0]} to {ids[1]} ===")
+            return graph_shortest_path(ids[0], ids[1])
+
+        elif op == "bidirectional_search" and len(ids) >= 2:
+            print(f"=== [Pipeline] Accessing Neo4j Graph (Bidirectional) for IDs: {ids[0]} to {ids[1]} ===")
+            return graph_bidirectional_search(ids[0], ids[1])
+
+        elif op == "common_ancestors" and len(ids) >= 2:
+            print(f"=== [Pipeline] Accessing Neo4j Graph (Common Ancestors) for IDs: {ids[0]} and {ids[1]} ===")
+            return graph_common_ancestors(ids[0], ids[1])
+
+        elif op in ("ego_network", "find_blockers", "find_blocked", "find_related", "find_duplicates") and ids:
+            print(f"=== [Pipeline] Accessing Neo4j Graph (Ego/Expand) for ID: {ids[0]} ===")
+            merged = graph_expand(ids[0], depth=5)
+            for extra_id in ids[1:]:
+                extra = graph_expand(extra_id, depth=5)
+                merged["outgoing"].extend(extra.get("outgoing", []))
+                merged["incoming"].extend(extra.get("incoming", []))
+                merged["journals"].extend(extra.get("journals", []))
+                merged["entities"].extend(extra.get("entities", []))
+            return merged
+
+        elif op == "dynamic":
+            print(f"=== [Pipeline] Accessing Neo4j Graph (Dynamic Query) for: '{query}' ===")
+            return graph_query_dynamic(query)
+
+        elif ids:
+            # Fallback: issue IDs present but op is unrecognised — ego-expand
+            print(f"=== [Pipeline] Accessing Neo4j Graph (Fallback Expand) for ID: {ids[0]} ===")
+            merged = graph_expand(ids[0], depth=5)
+            for extra_id in ids[1:]:
+                extra = graph_expand(extra_id, depth=5)
+                merged["outgoing"].extend(extra.get("outgoing", []))
+                merged["incoming"].extend(extra.get("incoming", []))
+                merged["journals"].extend(extra.get("journals", []))
+                merged["entities"].extend(extra.get("entities", []))
+            return merged
+
+        else:
+            # op != "none" but no IDs and not "dynamic" — run dynamic query on raw query text
+            print(f"=== [Pipeline] Accessing Neo4j Graph (Dynamic Query fallback) for: '{query}' ===")
+            return graph_query_dynamic(query)
 
     def run_journals():
         if "get_journals" in plan and ids:
@@ -140,8 +154,20 @@ def node_retrieve(state: AgentState) -> AgentState:
     def run_attachments():
         if "get_attachments" in plan and ids:
             print(f"=== [Pipeline] Accessing Attachments for ID: {ids[0]} ===")
+            # Try Chroma first (legacy)
             index = get_attachment_index(ids[0])
-            return process_attachments_for_issue(ids[0], index)
+            results = process_attachments_for_issue(ids[0], index)
+            
+            # If Chroma had no results, fall back to Neo4j
+            if not results:
+                print(f"=== [Pipeline] Chroma had no attachments, falling back to Neo4j ===")
+                from pipeline.retrieval.graph_retrieval import graph_get_attachments
+                neo4j_attachments = graph_get_attachments(ids[0])
+                if neo4j_attachments:
+                    print(f"=== [Pipeline] Found {len(neo4j_attachments)} attachments in Neo4j ===")
+                    results = process_attachments_for_issue(ids[0], neo4j_attachments)
+            
+            return results
         return []
 
     def run_html():
@@ -197,21 +223,33 @@ def node_fuse(state: AgentState) -> AgentState:
                 for n_id in r.get("node_path1", []) + r.get("node_path2", []):
                     if n_id:
                         graph_issues.append({"issue_id": n_id, "subject": "", "status": "", "vector_score": 0.8})
-            # Dynamic queries usually return issue records
-            issue_id = r.get("id") or r.get("issue_id") or r.get("Issue.id") or r.get("common_node")
+            # Dynamic queries return issue records with many possible column aliases;
+            # check all common ones so rows reach the RRF ranker.
+            issue_id = (
+                r.get("id") or r.get("issue_id") or r.get("issueId")
+                or r.get("Issue.id") or r.get("common_node")
+                or r.get("related_id") or r.get("relatedId")
+                or r.get("other_id") or r.get("otherId")
+                or r.get("blocker_id") or r.get("blockerId")
+                or r.get("dup_id") or r.get("dupId")
+                or r.get("latest_issue_id") or r.get("latestIssueId")
+            )
             if issue_id:
                 graph_issues.append({
                     "issue_id": issue_id,
-                    "subject":  r.get("subject") or r.get("Issue.subject", ""),
+                    "subject":  (
+                        r.get("subject") or r.get("Issue.subject")
+                        or r.get("latestSubject") or r.get("relatedSubject") or ""
+                    ),
                     "status":   r.get("status") or r.get("Issue.status", ""),
                     "vector_score": 0.8
                 })
 
     state["fused"] = fuse_all_evidence(
+        graph_results     = graph_issues,
+        graph_expand_data = state.get("graph_expand"),
         vector_results    = state.get("vector_results") or [],
         filter_results    = state.get("filter_results") or [],
-        graph_results     = graph_issues,
-        graph_expand_data = state.get("graph_expand")
     )
     return state
 
@@ -228,11 +266,12 @@ def node_compress(state: AgentState) -> AgentState:
 
     att_compressed = []
     for att in (state.get("attachment_data") or []):
+        summary = ""
         if att.get("text") and not att.get("error"):
             summary = compress_attachment_text(
                 att["filename"], att.get("type", "unknown"), att["text"]
             )
-            att_compressed.append({**att, "text": summary})
+        att_compressed.append({**att, "text": summary})
 
     # Primary issue — prefer exact filter match, else top vector result
     filter_r = state.get("filter_results") or []
@@ -246,12 +285,11 @@ def node_compress(state: AgentState) -> AgentState:
     state["journal_summary"] = journal_summary
     state["context_bundle"]  = build_context_bundle(
         primary_issue    = primary,
-        fused_issues     = fused["fused_issues"],
         graph_context    = fused["graph_context"],
+        fused_issues     = fused["fused_issues"],
         journal_summary  = journal_summary,
         attachment_texts = att_compressed,
-        html_fallback    = state.get("html_data"),
-        token_budget     = 4000
+        html_fallback    = state.get("html_data")
     )
     return state
 
